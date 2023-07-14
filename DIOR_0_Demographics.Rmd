@@ -1,0 +1,81 @@
+---
+title: "Demographics"
+author: "Rene Michel"
+date: '2022-08-03'
+output: html_document
+---
+
+# Configuration
+
+### Report settings
+
+```{r report settings}
+
+# R Markdown report settings
+knitr::opts_chunk$set(echo = FALSE, 
+                      message = FALSE, 
+                      warning = FALSE, 
+                      out.width = "100%")
+
+# Export .RData files for subsequent analyses?
+export = TRUE
+
+``` 
+
+### Define paths and dependencies
+
+```{r cfg paths, comment = ""}
+# PATHS -----------------------------------------------------------------------
+repo_path <- "add_path_here"
+# REQUIRED PKGS ----------------------------------------------------------------
+git_pkgs <- c("remichel/rmTools@HEAD")
+cran_pkgs <- c("dplyr", "tidyr", "ggplot2", "knitr", "kableExtra", "readxl")
+
+```
+
+## Load packages
+
+```{r pks, comment = ""}
+# load and install required packages
+rmTools::rm_install_packages(
+  git_pkgs = git_pkgs,
+  git_private_pkgs = NULL,
+  cran_pkgs = cran_pkgs, load_after_install = T
+)
+```
+## Load data
+
+```{r load data, comment = ""}
+demo <- read_xlsx(paste0(repo_path, "demographics.xlsx"))
+```
+
+# Demographics
+
+```{r descriptive stats, comment = ""}
+
+
+demo %>%
+  # filter excluded participants
+  filter(!(ID %in% c(1,3,4,20,21))) %>%
+  summary()
+
+demo %>% 
+# filter excluded participants
+  filter(!(ID %in% c(1,3,4,20,21))) %>%
+  summarise(Age_sd = sd(Age))
+
+demo %>%
+  # filter excluded participants
+  filter(!(ID %in% c(1,3,4,20,21))) %>%
+  count(Sex)
+
+demo %>%
+  # filter excluded participants
+  filter(!(ID %in% c(1,3,4,20,21))) %>%
+  count(Handedness)
+
+
+demo %>%
+  # filter excluded participants
+  filter(!(ID %in% c(1,3,4,20,21))) %>%
+  count(`Dominant Eye`)

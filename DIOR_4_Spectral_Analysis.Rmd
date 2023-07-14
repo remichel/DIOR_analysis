@@ -1,0 +1,521 @@
+---
+title: "Spectral Analysis"
+author: "Rene Michel"
+date: '2022-06-09'
+output: html_document
+---
+
+# Configuration
+
+### Report settings
+
+```{r report settings}
+
+knitr::opts_chunk$set(echo = FALSE, 
+                      message = FALSE, 
+                      warning = FALSE, 
+                      out.width = "100%")
+
+do_save = TRUE
+``` 
+
+### Define paths and dependencies
+
+```{r cfg paths}
+# PATHS -----------------------------------------------------------------------
+repo_path <- "add_path_here"
+# REQUIRED PKGS ----------------------------------------------------------------
+git_pkgs <- c("remichel/rmTools@HEAD", "remichel/boscillator@dior")
+cran_pkgs <- c("dplyr", "tidyr", "ggplot2", "knitr", "kableExtra", "scales")
+
+```
+
+```{r pks}
+# load and install required packages
+rmTools::rm_install_packages(
+  git_pkgs = git_pkgs,
+  git_private_pkgs = NULL,
+  cran_pkgs = cran_pkgs, load_after_install = T
+)
+```
+
+### Define analysis parameters
+
+Set all required parameters for the subsequent analysis. 
+
+
+```{r cfg analysis, echo = T}
+
+# PARADIGM SPECIFICATIONS NEEDED FOR BOSCILLATOR IMPORT
+
+# inter frame interval of our monitor (in ms)
+ifi <- 1000 / 120
+# spacing of SOAs (in number of frames)
+soa_spacing <- 5
+# expected SOAs (in ms)
+expected_soas <- round(c(0, seq(5, 125, soa_spacing) * ifi), 1)
+
+# ANALYSIS PARAMETERS
+
+# detrending order (second-order polynomial = 2)
+detrending_order <- 2
+# seed numbers for replicable results
+seed_num_valid <- 1
+seed_num_invalid <- 2
+
+# multiple comparison correction for spectral analysis
+mcc_spectral <- "maxfreq"
+# number of permutations
+n_surr <- 10000
+
+```
+
+
+# Load datasets
+
+```{r load}
+
+load(paste0(repo_path, "clean.RData"))
+load(paste0(repo_path, "diff.RData"))
+
+```
+
+# Spectral Analysis
+
+### Valid
+
+```{r spectral analysis valid, message=F, warning=F}
+
+# prepare data (filter to condition, soa to seconds)
+spec_data <- clean %>%
+  filter(validity == "valid") %>%
+  mutate(soa = soa / 1000)
+
+# import data into boscillator
+bosc <- bosc_import(data = spec_data,
+                    sfreq = 1000/(soa_spacing*ifi),
+                    n_timepoints = length(expected_soas)-1, # without 0 aka catch trials
+                    vars = c("subject", "soa", "trial", "rtz"),
+                    aggregate = T)
+
+# generate surrogate datasets
+bosc <- generate_surrogates(bosc,
+                            n_surr = n_surr,
+                            seed_num = seed_num_valid)
+
+# save permutations for difference time course 
+perm_valid <- bosc$data$ss$surrogate$data %>%
+    rename(valid = hr)
+
+if(do_save) save(file = paste0(repo_path, "perm_valid.RData"), perm_valid)
+
+
+# detrending
+bosc <- detrend_bosc(bosc,
+                     types = c("real", "surrogate"),
+                     levels = c("ga"),
+                     order = detrending_order)
+# fft
+bosc <- fft_bosc(bosc,
+                 types = c("real", "surrogate"),
+                 levels = c("ga"))
+
+# statistical test on amplitude
+bosc <- test_fft(bosc,
+                 levels = "ga",
+                 tests = c("amp"),
+                 alpha = .05,
+                 mcc = c(mcc_spectral))
+# save results
+spec_valid <- bosc
+if(do_save) save(file = paste0(repo_path, "spec_valid.RData"), spec_valid)
+
+
+# plot results
+
+
+# get detrended time courses
+tc <- spec_valid$data$ga$real$data
+# get respective test results
+results <- spec_valid$tests$fft$ga$amp$results
+# get respective max freq distribution
+maxfreq <- spec_valid$tests$fft$ga$amp$maxfreq
+
+
+# print results
+
+results %>%
+  knitr::kable(.) %>%
+  kable_styling(bootstrap_options = c("striped", "hover")) %>% 
+  scroll_box(width = "100%", height = "300px")
+
+      
+# extract threshold from max freq distribution
+maxfreq_distr <- maxfreq %>%
+              ungroup() %>% 
+              distinct(n_surr, max)
+    
+maxfreq_threshold <- quantile(maxfreq_distr$max, .95)
+    
+# plot detrended time course 
+
+labels = rep('', 25)
+labels[seq(1,25,6)] = as.character(tc$time*1000)[seq(1,25,6)]
+
+tc_plot <- tc %>%
+  ggplot(data = ., aes(x = time*1000, y = hr)) +
+  labs(#title = "Detrended Time Course",
+              y = "detrended z-scaled RT",
+          x = "CTOA") +
+  geom_hline(yintercept = 0, color = "grey50", linetype = "dotted", size = 1.2)+
+  geom_line(size = 1.2, alpha = .5, color = I(hue_pal()(4)[3]))+
+  geom_point(size = 2.3, position=position_dodge(width=8), color = I(hue_pal()(4)[3]))+
+  labs(x = "CTOA", y = "detrended z-standardized RTs")+
+  scale_x_continuous(expand = c(0.02, 0), breaks = sort(tc$time*1000), labels = labels) +
+  scale_y_continuous(expand = c(0.05, 0)) +
+  theme_classic() +
+  theme(legend.position="bottom",
+        axis.title = element_text(face = "bold", size = 20),
+        axis.text = element_text(face = "bold", size = 12),
+        legend.title = element_blank(),
+        legend.text = element_text(face = "bold", size = 12))
+
+tc_plot
+
+if(do_save) ggsave(file = paste0(repo_path, "detrended_tc_valid_ga.svg"), plot = tc_plot, width = 2000, height = 2000, units = "px")
+if(do_save) ggsave(file = paste0(repo_path, "detrended_tc_valid_ga.png"), plot = tc_plot, width = 2000, height = 2000, units = "px")
+    
+
+
+# publication plot
+pltdat <- results %>%
+     mutate(f = as.factor(f)) %>%
+     filter(mcc_method == "maxfreq") %>%
+     mutate(label = ifelse(sig == 1, "*", ""))
+    
+spec_plot <-  results %>%
+    mutate(f = as.factor(f)) %>%
+    filter(mcc_method == "maxfreq") %>%
+    mutate(label = ifelse(sig == 1, "*", "")) %>%
+    ggplot(aes(x = f, y = observed)) +
+    geom_hline(yintercept = maxfreq_threshold, color = "grey40", linetype = "dashed", size = 2)+
+    geom_line(aes(group = 1), size = 2)+
+    geom_text(data = pltdat, aes(x = f, y = max(observed)+.05, label = label), size = 10)+
+    scale_y_continuous(expand = c(0,0)) +
+    expand_limits(y = c(0, max(results$observed) + .15))+
+    theme_bw() +
+    labs(y = "Amplitude (a.u.)", x = "Frequency") +
+    theme(legend.position = "none",
+          axis.title = element_text(face = "bold", size = 16),
+          axis.text = element_text(face = "bold", size = 12))
+
+spec_plot
+
+if(do_save) ggsave(file = paste0(repo_path, "spec_valid_ga.svg"), plot = spec_plot, width = 2000, height = 2000, units = "px")
+if(do_save) ggsave(file = paste0(repo_path, "spec_valid_ga.png"), plot = spec_plot, width = 2000, height = 2000, units = "px")
+     
+
+
+# free workspace
+rm(bosc, perm_valid, results, tc, pltdat, spec_valid, spec_plot, maxfreq, maxfreq_distr)
+gc()
+
+
+```
+
+
+### Invalid
+
+```{r spectral analysis invalid, message=F, warning=F}
+
+# prepare data (filter to condition, soa to seconds)
+spec_data <- clean %>%
+  filter(validity == "invalid") %>%
+  mutate(soa = soa / 1000)
+
+# import data into boscillator
+bosc <- bosc_import(data = spec_data,
+                    sfreq = 1000/(soa_spacing*ifi),
+                    n_timepoints = length(expected_soas)-1, # without 0 aka catch trials
+                    vars = c("subject", "soa", "trial", "rtz"),
+                    aggregate = T)
+
+# generate surrogate datasets
+bosc <- generate_surrogates(bosc,
+                            n_surr = n_surr,
+                            seed_num = seed_num_invalid)
+
+# save permutations for difference time course 
+perm_invalid <- bosc$data$ss$surrogate$data %>%
+    rename(invalid = hr)
+
+if(do_save) save(file = paste0(repo_path, "perm_invalid.RData"), perm_invalid)
+
+
+# detrending
+bosc <- detrend_bosc(bosc,
+                     types = c("real", "surrogate"),
+                     levels = c("ga"),
+                     order = detrending_order)
+# fft
+bosc <- fft_bosc(bosc,
+                 types = c("real", "surrogate"),
+                 levels = c("ga")
+)
+
+# statistical test on amplitude
+bosc <- test_fft(bosc,
+                 levels = c("ga"),
+                 tests = c("amp"),
+                 alpha = .05,
+                 mcc = c(mcc_spectral)
+)
+# save results
+spec_invalid <- bosc
+if(do_save) save(file = paste0(repo_path, "spec_invalid.RData"), spec_invalid)
+
+# plot results
+
+
+# get detrended time courses
+tc <- spec_invalid$data$ga$real$data
+# get respective test results
+results <- spec_invalid$tests$fft$ga$amp$results
+# get respective max freq distribution
+maxfreq <- spec_invalid$tests$fft$ga$amp$maxfreq
+
+
+# print results
+
+results %>%
+  knitr::kable(.) %>%
+  kable_styling(bootstrap_options = c("striped", "hover")) %>% 
+  scroll_box(width = "100%", height = "300px")
+
+      
+# extract threshold from max freq distribution
+maxfreq_distr <- maxfreq %>%
+              ungroup() %>% 
+              distinct(n_surr, max)
+    
+maxfreq_threshold <- quantile(maxfreq_distr$max, .95)
+    
+# plot detrended time course 
+labels = rep('', 25)
+labels[seq(1,25,6)] = as.character(tc$time*1000)[seq(1,25,6)]
+
+tc_plot <- tc %>%
+  ggplot(data = ., aes(x = time*1000, y = hr)) +
+  labs(#title = "Detrended Time Course",
+              y = "detrended z-scaled RT",
+          x = "CTOA") +
+  geom_hline(yintercept = 0, color = "grey50", linetype = "dotted", size = 1.2)+
+  geom_line(size = 1.2, alpha = .5, color = I(hue_pal()(4)[1]))+
+  geom_point(size = 2.3, position=position_dodge(width=8), color = I(hue_pal()(4)[1]))+
+  labs(x = "CTOA", y = "detrended z-standardized RTs")+
+  scale_x_continuous(expand = c(0.02, 0), breaks = sort(tc$time*1000), labels = labels) +
+  scale_y_continuous(expand = c(0.05, 0)) +
+  theme_classic() +
+  theme(legend.position="bottom",
+        axis.title = element_text(face = "bold", size = 20),
+        axis.text = element_text(face = "bold", size = 12),
+        legend.title = element_blank(),
+        legend.text = element_text(face = "bold", size = 12))
+
+tc_plot
+
+if(do_save) ggsave(file = paste0(repo_path, "detrended_tc_invalid_ga.svg"), plot = tc_plot, width = 2000, height = 2000, units = "px")
+if(do_save) ggsave(file = paste0(repo_path, "detrended_tc_invalid_ga.png"), plot = tc_plot, width = 2000, height = 2000, units = "px")
+    
+
+
+# publication plot
+pltdat <- results %>%
+     mutate(f = as.factor(f)) %>%
+     filter(mcc_method == "maxfreq") %>%
+     mutate(label = ifelse(sig == 1, "*", ""))
+    
+spec_plot <-  results %>%
+    mutate(f = as.factor(f)) %>%
+    filter(mcc_method == "maxfreq") %>%
+    mutate(label = ifelse(sig == 1, "*", "")) %>%
+    ggplot(aes(x = f, y = observed)) +
+    geom_hline(yintercept = maxfreq_threshold, color = "grey40", linetype = "dashed", size = 2)+
+    geom_line(aes(group = 1), size = 2)+
+    geom_text(data = pltdat, aes(x = f, y = max(observed)+.05, label = label), size = 10)+
+    scale_y_continuous(expand = c(0,0)) +
+    expand_limits(y = c(0, max(results$observed) + .15))+
+    theme_bw() +
+    labs(y = "Amplitude (a.u.)", x = "Frequency") +
+    theme(legend.position = "none",
+          axis.title = element_text(face = "bold", size = 16),
+          axis.text = element_text(face = "bold", size = 12))
+
+spec_plot
+
+if(do_save) ggsave(file = paste0(repo_path, "spec_invalid_ga.svg"), plot = spec_plot, width = 2000, height = 2000, units = "px")
+if(do_save) ggsave(file = paste0(repo_path, "spec_invalid_ga.png"), plot = spec_plot, width = 2000, height = 2000, units = "px")
+    
+
+
+# free workspace
+rm(bosc, perm_invalid, results, tc, pltdat, spec_invalid, spec_plot, maxfreq, maxfreq_distr)
+gc()
+
+
+```
+
+
+### Difference time course
+
+
+
+
+```{r spectral analysis diff, message=F, warning=F}
+
+# boscillator package does not allow for permutations of multiple conditions yet, 
+# therefore we need to create the distribution under the null hypothesis manually 
+# by merging the permutations of both valid and invalid condition and calculate the
+# difference for each surrogate dataset and each SOA 
+
+
+
+load(paste0(repo_path, "perm_valid.RData"))
+load(paste0(repo_path, "perm_invalid.RData"))
+
+
+# prepare data (filter to condition, soa to seconds)
+spec_data <- diff %>% 
+  mutate(soa = soa / 1000)
+
+# import data into boscillator
+bosc <- bosc_import(data = spec_data,
+                    sfreq = 1000/(soa_spacing*ifi),
+                    n_timepoints = length(expected_soas)-1, 
+                    # without 0 aka catch trials
+                    vars = c("subject", "soa", "diffz"),
+                    level = "ss",
+                    aggregate = T)
+
+# manually import single subject surrogate datasets
+bosc$data$ss$surrogate$data <- perm_invalid %>%
+  # join valid and invalid permutations
+  full_join(perm_valid, by = c("subj", "time", "n_surr")) %>%
+  # calculate difference for each subject, SOA, and surrogate dataset
+  rowwise() %>%
+  mutate(hr = invalid - valid) %>%
+  # delete helper variables
+  select(-c("invalid", "valid"))
+
+# aggregate surrogate datasets
+bosc <- aggregate_bosc(bosc, 
+                       types = c("surrogate"), 
+                       levels = c("ga"))
+
+
+# detrending
+bosc <- detrend_bosc(bosc, 
+                     types = c("real", "surrogate"), 
+                     levels = c("ga"), 
+                     order = detrending_order)
+# fft
+bosc <- fft_bosc(bosc, 
+                 types = c("real", "surrogate"), 
+                 levels = c("ga"))
+
+# statistical test on amplitude
+bosc <- test_fft(bosc, 
+                 levels = c("ga"), 
+                 tests = c("amp"), 
+                 alpha = .05, 
+                 mcc = c(mcc_spectral))
+# save results
+spec_diff <- bosc
+
+# save concatenated bosc file
+if(do_save) save(file = paste0(repo_path, "spec_diff.RData"), spec_diff)
+
+
+
+# get detrended time courses
+tc <- spec_diff$data$ga$real$data
+# get respective test results
+results <- spec_diff$tests$fft$ga$amp$results
+# get respective max freq distribution
+maxfreq <- spec_diff$tests$fft$ga$amp$maxfreq
+
+
+
+# print results
+
+results %>%
+  knitr::kable(.) %>%
+  kable_styling(bootstrap_options = c("striped", "hover")) %>% 
+  scroll_box(width = "100%", height = "300px")
+
+      
+# extract threshold from max freq distribution
+maxfreq_distr <- maxfreq %>%
+              ungroup() %>% 
+              distinct(n_surr, max)
+    
+maxfreq_threshold <- quantile(maxfreq_distr$max, .95)
+    
+# plot detrended time course 
+labels = rep('', 25)
+labels[seq(1,25,6)] = as.character(tc$time*1000)[seq(1,25,6)]
+
+tc_plot <- tc %>%
+  ggplot(data = ., aes(x = time*1000, y = hr)) +
+  labs(#title = "Detrended Time Course",
+              y = "detrended z-scaled RT",
+          x = "CTOA") +
+  geom_hline(yintercept = 0, color = "grey50", linetype = "dotted", size = 1.2)+
+  geom_line(size = 1.2, alpha = .5)+
+  geom_point(size = 2.3, position=position_dodge(width=8))+
+  labs(x = "CTOA", y = "detrended z-standardized RTs")+
+  scale_x_continuous(expand = c(0.02, 0), breaks = sort(tc$time*1000), labels = labels) +
+  scale_y_continuous(expand = c(0.05, 0)) +
+  theme_classic() +
+  theme(legend.position="bottom",
+        axis.title = element_text(face = "bold", size = 20),
+        axis.text = element_text(face = "bold", size = 12),
+        legend.title = element_blank(),
+        legend.text = element_text(face = "bold", size = 12))
+
+tc_plot
+
+if(do_save) ggsave(file = paste0(repo_path, "detrended_tc_diff_ga.svg"), plot = tc_plot, width = 2000, height = 2000, units = "px")
+if(do_save) ggsave(file = paste0(repo_path, "detrended_tc_diff_ga.png"), plot = tc_plot, width = 2000, height = 2000, units = "px")
+    
+
+    
+
+# publication plot
+pltdat <- results %>%
+     mutate(f = as.factor(f)) %>%
+     filter(mcc_method == "maxfreq") %>%
+     mutate(label = ifelse(sig == 1, "*", ""))
+    
+spec_plot <-  results %>%
+    mutate(f = as.factor(f)) %>%
+    filter(mcc_method == "maxfreq") %>%
+    mutate(label = ifelse(sig == 1, "*", "")) %>%
+    ggplot(aes(x = f, y = observed)) +
+    geom_hline(yintercept = maxfreq_threshold, color = "grey40", linetype = "dashed", size = 2)+
+    geom_line(aes(group = 1), size = 2)+
+    geom_text(data = pltdat, aes(x = f, y = max(observed)+.05, label = label), size = 10)+
+    scale_y_continuous(expand = c(0,0)) +
+    expand_limits(y = c(0, max(maxfreq_threshold, max(results$observed)) + .15))+
+    theme_bw() +
+    labs(y = "Amplitude (a.u.)", x = "Frequency") +
+    theme(legend.position = "none",
+          axis.title = element_text(face = "bold", size = 16),
+          axis.text = element_text(face = "bold", size = 12))
+
+spec_plot
+
+if(do_save) ggsave(file = paste0(repo_path, "spec_diff_ga.svg"), plot = spec_plot, width = 2000, height = 2000, units = "px")
+if(do_save) ggsave(file = paste0(repo_path, "spec_diff_ga.png"), plot = spec_plot, width = 2000, height = 2000, units = "px")
+
+```

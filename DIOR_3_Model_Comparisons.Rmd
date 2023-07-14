@@ -1,0 +1,667 @@
+---
+title: "Modelling Analysis"
+author: "Rene Michel"
+date: '2022-06-09'
+output: html_document
+---
+
+
+# Configuration
+
+### Report settings
+
+```{r report settings, message = FALSE, warning=FALSE}
+
+knitr::opts_chunk$set(echo = FALSE, 
+                      message = FALSE, 
+                      warning = FALSE, 
+                      out.width = "100%")
+
+do_save = TRUE
+
+``` 
+
+### Define paths and dependencies
+
+```{r cfg paths, message = FALSE, warning=FALSE}
+# PATHS -----------------------------------------------------------------------
+repo_path <- "add_path_here"
+# REQUIRED PKGS ----------------------------------------------------------------
+git_pkgs <- c("remichel/rmTools@HEAD")
+cran_pkgs <- c("Rmisc", "dplyr", "tidyr", "tibble", "nls.multstart", "broom",
+               "AICcmodavg", "ggplot2", "knitr", "kableExtra", "wesanderson")
+```
+
+```{r pks, message = FALSE, warning=FALSE}
+# load and install required packages
+rmTools::rm_install_packages(
+  git_pkgs = git_pkgs,
+  git_private_pkgs = NULL,
+  cran_pkgs = cran_pkgs, load_after_install = T
+)
+```
+
+### Define analysis parameters
+
+Set all required parameters for the subsequent analysis. 
+
+
+```{r cfg analysis, echo = T, message = FALSE, warning=FALSE}
+
+# number of start values for fitting procedure of nls_multstart
+# will be repeated times the number of parameters to be fitted,
+# e.g. rep(niter, 3) for three parameters (see "? nls_multstart")
+niter <- 5
+# no early stopping rule for fitting procedure with nls_multstart,
+# setting convergence count to FALSE forces to do all iterations
+convergence_count <- FALSE
+# parameter space limits per parameter (lower and upper bounds)
+# Note 1: for f, we exclude nyquist frequency (i.e. 12 Hz)
+# Note 2: lowest technically plausible frequency is 1 Hz
+limits <- list(
+  i = c(-Inf, Inf),
+  n0 = c(0, Inf),
+  tau = c(0, 3),
+  a = c(0, Inf),
+  f = c(1, 11), # 3-8
+  phi = c(0, 2 * pi)
+)
+# start value range per parameter (lower and upper bounds)
+# for grid search, equally spaced start values will be drawn from
+# the start value range
+starts <- list(
+  i = c(-5, 5),
+  n0 = c(0, 5),
+  tau = c(0, 3),
+  a = c(0, 5),
+  f = c(1, 11), # 3-8
+  phi = c(0, 2 * pi)
+)
+
+# MODEL FUNCTIONS -------------------------------------------------------
+
+# exponential model formula
+expModel <- function(t, intercept, n0, tau) {
+  intercept + n0 * exp(-t / tau)
+}
+# sinusoidal model formula
+sinModel <- function(t, intercept, a, f, phi) {
+  intercept + a * sin(2 * pi * t * f + phi)
+}
+# hybrid model formula
+hybModel <- function(t, intercept, n0, tau, a, f, phi) {
+  intercept + n0 * exp(-t / tau) + a * sin(2 * pi * t * f + phi)
+}
+
+```
+
+
+# Load Data
+
+```{r load, message = FALSE, warning=FALSE}
+load(paste0(repo_path, "diff.RData"))
+load(paste0(repo_path, "diff_agg.RData"))
+```
+
+# Prepare datasets
+
+We need SOA in s, not ms, to interpret frequency estimates properly. 
+
+```{r prepare datasets, message = FALSE, warning=FALSE}
+
+modeldata_ga <- diff_agg %>%
+  rename(diffz = diff) %>%
+  mutate(soa = soa/1000) %>% 
+  # we need this variable later for joining with the model results and predictions
+  mutate(model = "observed") 
+
+
+modeldata_ss <- diff %>%
+  mutate(soa = soa/1000) %>%
+  # we need this variable later for joining with the model results and predictions
+  mutate(model = "observed") 
+
+```
+
+
+# Model comparison
+
+
+### Grand Average
+
+
+
+```{r modelling grandavg, message = FALSE, warning=FALSE}
+
+# set seed to get reproducible results
+set.seed(1)
+
+# note for modelling: 
+# some iterations will throw errors due to bad starting values, we can
+# suppress such with supp_errors. If all iterations fail, it will still throw
+# an error.
+
+results <- modeldata_ga %>%
+  # nest data to allow for modelling within tibble
+  nest(data = everything()) %>%
+  # fit all models
+  mutate(m_int = purrr::map(.data$data, ~ lm(diffz ~ 1, data = .))) %>%
+  mutate(m_lin = purrr::map(.data$data, ~ lm(diffz ~ soa, data = .))) %>%
+  mutate(m_exp = 
+           purrr::map(.data$data, 
+                      ~ nls_multstart(diffz ~ expModel(soa, intercept, n0, tau),
+                                      data = .,
+                                      lower = c(intercept = limits$i[1],
+                                                n0 = limits$n0[1], 
+                                                tau = limits$tau[1]),
+                                      upper = c(intercept = limits$i[2],
+                                                n0 = limits$n0[2], 
+                                                tau = limits$tau[2]),
+                                      start_lower = 
+                                        c(intercept = starts$i[1], 
+                                          n0 = starts$n0[1], 
+                                          tau = starts$tau[1]),
+                                      start_upper = 
+                                        c(intercept = starts$i[2], 
+                                          n0 = starts$n0[2], 
+                                          tau = starts$tau[2]),
+                                      iter = rep(niter, 3),
+                                      supp_errors = "Y", 
+                                      convergence_count = convergence_count
+                                      ))) %>%
+  mutate(m_sin = 
+           purrr::map(.data$data, 
+                      ~ nls_multstart(diffz ~ sinModel(soa, 
+                                                     intercept, a, f, phi),
+                                      data = .,
+                                      lower = c(intercept = limits$i[1], 
+                                                a = limits$a[1], 
+                                                f = limits$f[1], 
+                                                phi = limits$phi[1]),
+                                      upper = c(intercept = limits$i[2], 
+                                                a = limits$a[2], 
+                                                f = limits$f[2], 
+                                                phi = limits$phi[2]),
+                                      start_lower = c(intercept = starts$i[1],
+                                                      a = starts$a[1], 
+                                                      f = starts$f[1], 
+                                                      phi = starts$phi[1]),
+                                      start_upper = c(intercept = starts$i[2],
+                                                      a = starts$a[2], 
+                                                      f = starts$f[1], 
+                                                      phi = starts$phi[2]),
+                                      iter = rep(niter, 4),
+                                      supp_errors = "Y",
+                                      convergence_count = convergence_count))) %>%
+  mutate(m_hyb = 
+           purrr::map(.data$data, 
+                      ~ nls_multstart(diffz ~ hybModel(soa, intercept, 
+                                                     n0, tau, a, f, phi),
+                                      data = .,
+                                      lower = c(intercept = limits$i[1], 
+                                                n0 = limits$n0[1], 
+                                                tau = limits$tau[1], 
+                                                a = limits$a[1], 
+                                                f = limits$f[1], 
+                                                phi = limits$phi[1]),
+                                      upper = c(intercept = limits$i[2], 
+                                                n0 = limits$n0[2], 
+                                                tau = limits$tau[2], 
+                                                a = limits$a[2], 
+                                                f = limits$f[2], 
+                                                phi = limits$phi[2]),
+                                      start_lower = c(intercept = starts$i[1],
+                                                      n0 = starts$n0[1], 
+                                                      tau = starts$tau[1], 
+                                                      a = starts$a[1], 
+                                                      f = starts$f[1], 
+                                                      phi = starts$phi[1]),
+                                      start_upper = c(intercept = starts$i[2],
+                                                      n0 = starts$n0[2], 
+                                                      tau = starts$tau[2], 
+                                                      a = starts$a[2], 
+                                                      f = starts$f[2], 
+                                                      phi = starts$phi[2]),
+                                      iter = rep(niter, 6),
+                                      supp_errors = "Y", 
+                                      convergence_count = convergence_count))) %>%
+  # bring into long format
+  pivot_longer(cols = c(m_int, m_lin, m_exp, m_sin, m_hyb),
+               names_to = "model",
+               values_to = "fit") %>%
+  # extract goodness of fits per model
+  group_by(fit) %>%
+  mutate(glance = purrr::map(.data$fit, ~ broom::glance(.))) %>%
+  # extract param estimates per model
+  mutate(tidy = purrr::map(.data$fit, ~ broom::tidy(.))) %>%
+  # unpack results
+  unnest(cols = c(glance)) %>%
+  # remove unwanted cols
+  select(-c(sigma, isConv, finTol, logLik, 
+            deviance, statistic, df, p.value)) %>%
+  # unpack estimates
+  unnest(cols = c(tidy)) %>%
+  # remove unwanted cols
+  select(-c(std.error, statistic, p.value)) %>%
+  # align parameter names (they differ between stats and nls_multstart pkgs)
+  mutate(term = case_when(term == "(Intercept)" ~ "intercept",
+                          TRUE ~ term)) %>%
+  # bring estimates into wide format
+  pivot_wider(names_from = term,
+              values_from = estimate) %>%
+  # calculate AICc
+  mutate(AICc = purrr::map(.data$fit, ~ AICc(.))) %>%
+  unnest(AICc) %>%
+  # get model predictions for diffz
+  mutate(diffz = purrr::map(.data$fit, ~ predict(.))) %>%
+  unnest(cols = diffz) %>%
+  # rename soa to b1, because linear model's b1 was called "soa"
+  rename(b1 = soa) %>% 
+  # add SOA as variable to join with modeldata_ga in a next step
+  mutate(soa = sort(unique(modeldata_ga$soa))) %>%
+  # add observed values
+  select(-data) %>%
+  full_join(modeldata_ga) %>%
+  # convert GOF indices to long format plotting
+  pivot_longer(cols = c(AIC, AICc, BIC),
+               names_to = "index",
+               values_to = "index_value")
+
+```
+
+##### Plot model predictions
+
+```{r plot predictions, message = FALSE, warning=FALSE}
+
+
+
+results <- results %>%
+  mutate(soa = soa * 1000) %>%
+  filter(model != "observed")
+
+
+pdat <- diff %>%
+  summarySEwithin(data = ., 
+                  measurevar = "diffz",
+                  withinvars = c("soa"),
+                  idvar = "subject") %>%
+  mutate(soa = fac2num(soa),
+         observed = diffz) %>%
+  select(-c("diffz")) %>%
+  full_join(results, by = c("soa")) %>%
+  mutate(model = factor(model, 
+                        levels = c("m_int", "m_lin", "m_exp", "m_sin", "m_hyb"), 
+                        labels = c("intercept", "linear", "exponential", "rhythmic", "hybrid")))
+
+labels = rep('', 25)
+labels[seq(1,25,7)] = as.character(sort(unique(pdat$soa))[seq(1,25,7)])
+
+model_plot <- pdat %>%
+  ggplot(aes(x = soa, y = diffz)) +
+  geom_line(aes(x = soa, y = diffz, color = model), size = 3)+
+  geom_hline(yintercept = 0, color = "grey50", linetype = "dotted", size = 1.2)+
+  geom_point(aes(x = soa, y = observed), size = 2.3, position=position_dodge(width=8))+
+  labs(x = "CTOA", y = "z-standardized RT difference\n(invalid-valid)")+
+  facet_wrap(~model, ncol = 5)+
+  scale_x_continuous(expand = c(0.02, 0), breaks = sort(unique(pdat$soa)), labels = labels) +
+  scale_y_continuous(expand = c(0.05, 0)) +
+  scale_color_manual(values = wes_palette("Darjeeling1"))+
+  theme_bw() +
+  theme(legend.position="none",
+        axis.title = element_text(face = "bold", size = 16),
+        axis.text.y = element_text(face = "bold", size = 12),
+        axis.text.x = element_text(face = "bold", size = 9),
+        legend.title = element_blank(),
+        legend.text = element_text(face = "bold", size = 12),
+        strip.background = element_rect(fill = "white"),
+        strip.text = element_text(face = "bold", size = 15),
+        panel.grid.major = element_blank(), panel.grid.minor = element_blank())
+
+model_plot
+
+
+
+if(do_save) ggsave(filename = paste0(repo_path, "model_plot_", paste0(starts$f, collapse = "_"), ".svg"), plot = model_plot, width = 3600, height = 1200, units = "px")
+
+
+```
+
+##### Model fits
+
+```{r Fits, message = FALSE, warning=FALSE}
+
+# show table with results and fitted params
+result_table <- results %>%
+  ungroup() %>%
+  filter(model != "observed") %>%
+  select(-c(r.squared, adj.r.squared, fit, soa, diffz, nobs)) %>%
+  distinct() %>%
+  pivot_wider(names_from = index,
+              values_from = index_value)
+
+result_table %>%
+  knitr::kable(.) %>%
+  kable_styling(bootstrap_options = c("striped", "hover")) %>%
+  scroll_box(width = "100%", height = "300px")
+
+# latex table
+result_table %>%
+  select(-c("df.residual", "AIC")) %>%
+  knitr::kable(., "latex", align = "c", digits = 2) 
+
+
+
+```
+
+##### Model comparisons using AICc and BIC
+
+
+```{r AICc and BIC, message = FALSE, warning=FALSE}
+
+dAICc <- result_table %>%
+  # AICc differences from best model, and relative likelihood of each model
+  mutate(minAICc = min(AICc),
+         dAICc = AICc - minAICc,
+         relL = exp(-0.5 * dAICc)) %>%
+  # compute Akaike weights
+  mutate(w_i = relL / sum(relL)) %>%
+  # Akaike weight ratios
+  bind_cols(., outer(.$w_i, .$w_i, "/") %>% 
+  as.data.frame()  %>% 
+  setNames(., nm = c("vs_intercept", "vs_lin", "vs_exp", "vs_sin", "vs_hyb"))) %>%
+  pivot_longer(cols = c("vs_intercept", "vs_lin", "vs_exp", "vs_sin", "vs_hyb"),
+               names_to = "vs",
+               values_to = "w_ratio")  
+
+
+dBIC <- result_table %>%
+  # add all BIC differences between models
+  bind_cols(., outer(.$BIC, .$BIC, "-") %>% 
+  as.data.frame()  %>% 
+  setNames(., nm = c("vs_intercept", "vs_lin", "vs_exp", "vs_sin", "vs_hyb"))) %>%
+  pivot_longer(cols = c("vs_intercept", "vs_lin", "vs_exp", "vs_sin", "vs_hyb"),
+               names_to = "vs",
+               values_to = "dBIC") %>%
+  # add BF approximation by Wagenmakers (2007)
+  mutate(approxBF = exp(.5 * dBIC)) 
+
+# combine both tables
+dAICc %>% 
+  full_join(dBIC) %>%
+  select(-c(df.residual, intercept, b1, n0, tau, a, f, phi, AIC)) %>%
+  knitr::kable(., digits = 3, format.args = list(scientific = FALSE)) %>%
+  kable_styling(bootstrap_options = c("striped", "hover"))    %>%
+  scroll_box(width = "100%", height = "300px")
+
+
+
+
+
+```
+
+### Single subject
+
+
+```{r modelling ssubj, message = FALSE, warning=FALSE}
+
+# set seed to get reproducible results
+set.seed(999)
+
+
+results <- modeldata_ss %>%
+  group_by(subject) %>%
+  # nest data to allow for modelling within tibble
+  nest() %>%
+  # fit all models
+  mutate(m_int = purrr::map(.data$data, ~ lm(diffz ~ 1, data = .))) %>%
+  mutate(m_lin = purrr::map(.data$data, ~ lm(diffz ~ soa, data = .))) %>%
+  mutate(m_exp = 
+           purrr::map(.data$data, 
+                      ~ nls_multstart(diffz ~ expModel(soa, intercept, n0, tau),
+                                      data = .,
+                                      lower = c(intercept = limits$i[1], 
+                                                n0 = limits$n0[1], 
+                                                tau = limits$tau[1]),
+                                      upper = c(intercept = limits$i[2], 
+                                                n0 = limits$n0[2], 
+                                                tau = limits$tau[2]),
+                                      start_lower = c(intercept = starts$i[1],
+                                                      n0 = starts$n0[1], 
+                                                      tau = starts$tau[1]),
+                                      start_upper = c(intercept = starts$i[2],
+                                                      n0 = starts$n0[2], 
+                                                      tau = starts$tau[2]),
+                                      iter = rep(niter, 3),
+                                      supp_errors = "Y", 
+                                      convergence_count = convergence_count))) %>%
+  mutate(m_sin = 
+           purrr::map(.data$data, 
+                      ~ nls_multstart(diffz ~ sinModel(soa, intercept, a, 
+                                                     f, phi),
+                                      data = .,
+                                      lower = c(intercept = limits$i[1], 
+                                                a = limits$a[1], 
+                                                f = limits$f[1], 
+                                                phi = limits$phi[1]),
+                                      upper = c(intercept = limits$i[2], 
+                                                a = limits$a[2], 
+                                                f = limits$f[2], 
+                                                phi = limits$phi[2]),
+                                      start_lower = c(intercept = starts$i[1],
+                                                      a = starts$a[1], 
+                                                      f = starts$f[1], 
+                                                      phi = starts$phi[1]),
+                                      start_upper = c(intercept = starts$i[2],
+                                                      a = starts$a[2], 
+                                                      f = starts$f[1], 
+                                                      phi = starts$phi[2]),
+                                      iter = rep(niter, 4),
+                                      supp_errors = "Y",
+                                      convergence_count = convergence_count))) %>%
+  mutate(m_hyb = 
+           purrr::map(.data$data, 
+                      ~ nls_multstart(diffz ~ hybModel(soa, intercept, 
+                                                     n0, tau, a, f, phi),
+                                      data = .,
+                                      lower = c(intercept = limits$i[1], 
+                                                n0 = limits$n0[1], 
+                                                tau = limits$tau[1], 
+                                                a = limits$a[1], 
+                                                f = limits$f[1], 
+                                                phi = limits$phi[1]),
+                                      upper = c(intercept = limits$i[2], 
+                                                n0 = limits$n0[2], 
+                                                tau = limits$tau[2], 
+                                                a = limits$a[2], 
+                                                f = limits$f[2], 
+                                                phi = limits$phi[2]),
+                                      start_lower = c(intercept = starts$i[1],
+                                                      n0 = starts$n0[1], 
+                                                      tau = starts$tau[1], 
+                                                      a = starts$a[1], 
+                                                      f = starts$f[1], 
+                                                      phi = starts$phi[1]),
+                                      start_upper = c(intercept = starts$i[2],
+                                                      n0 = starts$n0[2], 
+                                                      tau = starts$tau[2], 
+                                                      a = starts$a[2], 
+                                                      f = starts$f[2],
+                                                      phi = starts$phi[2]),
+                                      iter = rep(niter, 6),
+                                      supp_errors = "Y",
+                                      convergence_count = convergence_count))) %>%
+  # bring into long format
+  pivot_longer(cols = c(m_int, m_lin, m_exp, m_sin, m_hyb),
+               names_to = "model",
+               values_to = "fit") %>%
+  # extract goodness of fits per model
+  group_by(subject, fit) %>%
+  mutate(glance = purrr::map(.data$fit, ~ broom::glance(.))) %>%
+  # extract param estimates per model
+  mutate(tidy = purrr::map(.data$fit, ~ broom::tidy(.))) %>%
+  # unpack results
+  unnest(cols = c(glance)) %>%
+  # remove unwanted cols
+  select(-c(sigma, isConv, finTol, logLik, 
+            deviance, statistic, df, p.value)) %>%
+  # unpack estimates
+  unnest(cols = c(tidy)) %>%
+  # remove unwanted cols
+  select(-c(std.error, statistic, p.value)) %>%
+  # align parameter names (they differ between stats and nls_multstart pkgs)
+  mutate(term = case_when(term == "(Intercept)" ~ "intercept",
+                          TRUE ~ term)) %>%
+  # bring estimates into wide format
+  pivot_wider(names_from = term,
+              values_from = estimate) %>%
+  # calculate AICc
+  mutate(AICc = purrr::map(.data$fit, ~ AICc(.))) %>%
+  unnest(AICc) %>%
+  # get model predictions for diffz
+  mutate(diffz = purrr::map(.data$fit, ~ predict(.))) %>%
+  unnest(cols = diffz) %>%
+  # rename soa to b1, because linear model's b1 was called "soa"
+  rename(b1 = soa) %>% 
+  # add SOA as variable to join with modeldata_ss in a next step
+  mutate(soa = sort(unique(modeldata_ss$soa))) %>%
+  # add observed values
+  select(-data) %>%
+  full_join(modeldata_ss) %>%
+  # convert GOF indices to long format plotting
+  pivot_longer(cols = c(AIC, AICc, BIC),
+               names_to = "index",
+               values_to = "index_value") 
+
+
+```
+
+
+```{r identify winner model per subj, message = FALSE, warning=FALSE}
+
+results <- results %>%
+  # mark winner model per subject and index
+  group_by(subject, index) %>%
+  mutate(min_value = min(index_value, na.rm = T)) %>% # na.rm = T to ignore "observed" column
+  mutate(winner_model = case_when(index_value == min_value ~ "*",
+                                TRUE ~ "")) %>%
+  ungroup()
+
+```
+
+##### Model fits
+
+```{r ss model fits, message = FALSE, warning=FALSE}
+
+# show table with results and fitted params
+result_table <- results %>% 
+  ungroup() %>%
+  filter(model != "observed") %>%
+  mutate(n0 = round(n0,2),
+         tau = round(tau, 2),
+         a = round(a, 2),
+         f = round(f, 2),
+         phi = round(phi, 2)) %>%
+  select(-c(r.squared, adj.r.squared, fit, soa, diffz, min_value, diff, nobs, df.residual, winner_model)) %>%
+  distinct() %>%
+  pivot_wider(names_from = index,
+              values_from = index_value) 
+
+result_table %>%
+  knitr::kable(.) %>%
+  kable_styling(bootstrap_options = c("striped", "hover")) %>%
+  scroll_box(width = "100%", height = "300px")
+
+```
+
+
+
+##### Model comparison using AICc and BIC
+
+```{r ss AIC BIC, message = FALSE, warning=FALSE}
+
+dAICc <- result_table %>%
+  group_by(subject) %>%
+  # AICc differences from best model, and relative likelihood of each model
+  mutate(minAICc = min(AICc),
+         dAICc = AICc - minAICc,
+         relL = exp(-0.5 * dAICc)) %>%
+  # compute Akaike weights
+  mutate(w_i = relL / sum(relL)) %>%
+  group_modify( ~ bind_cols(., outer(.$w_i, .$w_i, "/") %>% as.data.frame() %>% 
+               setNames(., nm = c("vs_intercept", "vs_lin", "vs_exp", "vs_sin", "vs_hyb")))) %>% 
+  group_by(subject) %>%
+  pivot_longer(cols = c("vs_intercept", "vs_lin", "vs_exp", "vs_sin", "vs_hyb"),
+               names_to = "vs",
+               values_to = "w_ratio") 
+
+
+dBIC <- result_table %>%
+  # add all BIC differences between models for each subject
+  group_by(subject) %>%
+  group_modify( ~ bind_cols(., outer(.$BIC, .$BIC, "-") %>% as.data.frame() %>% 
+               setNames(., nm = c("vs_intercept", "vs_lin", "vs_exp", "vs_sin", "vs_hyb")))) %>% 
+  group_by(subject) %>%
+  pivot_longer(cols = c("vs_intercept", "vs_lin", "vs_exp", "vs_sin", "vs_hyb"),
+               names_to = "vs",
+               values_to = "dBIC")  %>%
+  # add BF approximation by Wagenmakers (2007)
+  mutate(approxBF = exp(.5 * dBIC))
+
+# combine both tables
+deltas <- dAICc %>% 
+  full_join(dBIC) %>%
+  select(-c(intercept, b1, n0, tau, a, f, phi, AIC)) 
+
+deltas %>%
+  knitr::kable(.) %>%
+  kable_styling(bootstrap_options = c("striped", "hover")) %>%
+  scroll_box(width = "100%", height = "300px")
+
+```
+
+
+#### Distribution of winner models
+
+```{r winner models, message = FALSE, warning=FALSE}
+
+# distribution of winner models across subjects
+
+winner_per_index <- results %>%
+  filter(model != "observed", index != "AIC") %>%
+  # convert to factor so that missing factor levels (e.g. because of 0 counts) can be added to final table
+  purrr::modify_if(is.character, as.factor) %>%
+  # only select necessary variables
+  select(subject, model, index, winner_model) %>%
+  # there were 25 rows per subject due to model predicitions per SOA, but we need to get rid of them here to count occurences of winner models
+  distinct() %>%
+  # helper variable to be counted in the next step
+  group_by(index, model, winner_model) %>%
+  tally() %>%
+  ungroup() %>%
+  # fill all combinations of the grouping variables that werent occuting in dataset with 0
+  complete(., index, model, winner_model, fill = list(n = 0)) %>%
+  # filter to winner models
+  filter(winner_model == "*") %>%
+  mutate(model = factor(model, 
+                        levels = c("m_int", "m_lin", "m_exp", "m_sin", "m_hyb"), 
+                        labels = c("intercept", "linear", "exponential", "sinusoidal", "hybrid")))
+
+
+
+# table for distribution
+winner_per_index %>%
+  # exclude winnermodel var
+  select(-c(winner_model)) %>%
+  # bring into wide format
+  pivot_wider(names_from = index, values_from = n) %>%
+  # order chart with increasing complexity of model
+  slice(3,4,1,5,2) %>%
+  # fancy table
+  knitr::kable(.) %>%
+  kable_styling(bootstrap_options = c("striped", "hover")) %>%
+  scroll_box(width = "100%", height = "300px")
+
+
+
+```
+

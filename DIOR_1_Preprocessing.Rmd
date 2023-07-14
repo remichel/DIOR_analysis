@@ -1,0 +1,365 @@
+---
+title: "Preprocessing"
+author: "Rene Michel"
+date: '2022-06-09'
+output: html_document
+---
+
+# Configuration
+
+```{r report settings, message = F, warning= F}
+
+# R Markdown report settings
+knitr::opts_chunk$set(echo = FALSE, 
+                      message = FALSE, 
+                      warning = FALSE, 
+                      out.width = "100%")
+
+# Export .RData files for subsequent analyses?
+export = TRUE
+
+``` 
+
+```{r cfg paths, message = F, warning= F}
+# PATHS -----------------------------------------------------------------------
+repo_path <- "add_path_here"
+# REQUIRED PKGS ----------------------------------------------------------------
+git_pkgs <- c("remichel/rmTools@HEAD")
+cran_pkgs <- c("dplyr", "tidyr", "ggplot2", "knitr", "kableExtra")
+
+```
+
+```{r pks, message = F, warning= F}
+# load and install required packages
+rmTools::rm_install_packages(
+  git_pkgs = git_pkgs,
+  git_private_pkgs = NULL,
+  cran_pkgs = cran_pkgs, load_after_install = T
+)
+```
+## Design specs and exclusion criteria
+
+
+```{r cfg analysis, echo = T, message = F, warning= F}
+# DESIGN SPECIFICATIONS -------------------------------------------------
+
+# list of subject ids
+subject_list <- seq(1, 44, 1)
+# inter frame interval of our monitor (in ms)
+ifi <- 1000 / 120
+# spacing of SOAs (in number of frames)
+soa_spacing <- 5
+# expected SOAs (in ms)
+expected_soas <- round(c(0, seq(5, 125, soa_spacing) * ifi), 1)
+# values in dataframe that should be interpreted as "NA"
+na_strings <- c("9999", "9999.00")
+
+# EXCLUSION CRITERIA ----------------------------------------------------
+
+# subjects with high FA rate in catch trials will be excluded; .2 = 20%
+fa_threshold <- .2
+# RTs lower than min_rt will be excluded; in ms
+min_rt <- 200
+# exclusion criteria for RTs, e.g. values exceeding +/- 4*SD will be excluded
+rt_sd <- 4
+
+```
+
+
+# Load datasets
+
+```{r load data, message = F, warning= F}
+# load behavioral data
+for (i in subject_list) {
+  if (i == min(subject_list)) {
+    raw <- read.table(paste0(repo_path, i, "/", i, ".txt"),
+      h = T,
+      na.strings = na_strings
+    )
+  } else {
+    # concatenate
+    raw <- rbind(raw, read.table(paste0(repo_path, i, "/", i, ".txt"),
+      h = T,
+      na.strings = na_strings
+    ))
+  }
+}
+# load outofbounds file, which stores information about all trials that n
+# eeded to be aborted online but were missed by online fixation control
+load(paste0(repo_path, "outofbounds.Rdat"))
+
+```
+
+# Preparation
+
+
+```{r preparation, message = F, warning= F}
+
+# align SOAs across subjects
+raw <- raw %>%
+  rowwise() %>%
+  mutate(soa = expected_soas[which.min((abs(soa - expected_soas)))]) %>%
+  ungroup()
+
+
+# introduce validity variable
+raw <- raw %>%
+  mutate(validity = case_when(
+    target_position == 0 ~ "catch",
+    cue_position == target_position ~ "valid",
+    TRUE ~ "invalid"
+  ))
+
+# prepare outofbounds df
+outofbounds <- outofbounds %>%
+  mutate(needs_abortion = 1) %>%
+  mutate(subject = as.numeric(subject))
+```
+
+
+
+
+
+# Exclusions
+
+We apply the following exclusions:
+
+- subjects with a false alarm rate > 20% (note that these subjects were subsequently substituted by new recorded subjects to end with the desired sample size of 39 subjects)
+- practice trials (not needed for analysis)
+- aborted trials
+- trials that were missed by online fixation control
+- catch trials (not needed for analysis, only used to determine subjects false alarm rates)
+- incorrect trials (i.e. no button press)
+- trials with an RT < 200ms
+- trials with an RT exceeding mean(RT) +/- 4 SD (within subject and within conditions, after excluding all abovementioned trials)
+
+
+## False alarms
+
+The following subjects need to be excluded for subsequent analyses due to a false alarm rate higher than 20%:
+
+```{r fa exclusions, message = F, warning= F}
+
+fa <- raw %>%
+  dplyr::filter(section == 1, 
+                soa == 0, 
+                abort == 0) %>%
+  dplyr::group_by(subject) %>%
+  dplyr::summarise(n_fa = n() - sum(correct),
+                   ntrials = n(),
+                   fa = round(1 - mean(correct), 3)) %>%
+  dplyr::mutate(fa_threshold = fa_threshold,
+                exclude = case_when(fa_threshold < fa ~ 1, TRUE ~ 0)) %>%
+  arrange(desc(n_fa)) %>%
+  as.data.frame() 
+
+# table excluded subjects
+fa %>%
+  filter(exclude == TRUE) %>%
+  knitr::kable(.) %>%
+  kable_styling(bootstrap_options = c("striped", "hover")) %>% 
+  scroll_box(width = "100%", height = "300px")
+
+
+```
+
+
+```{r exclusion, message = F, warning= F}
+
+clean <- raw %>%
+  # exclude practice trials & aborted trials
+  filter(section == 1, abort == 0) %>%
+  # exclude trials that were missed to be aborted and repeated online
+  full_join(., outofbounds) %>%
+  filter(is.na(needs_abortion)) %>%
+  # exclude subjects with too high FA rate
+  filter(!subject %in% filter(fa, exclude == 1)$subject) %>%
+  # exclude catch trials and incorrect trials
+  filter(soa != 0, correct == 1) %>%
+  # exclude RTs <= 200ms
+  filter(rt >= min_rt) %>%
+  # prepare lower and upper bound per subject/condition to exlude RTs > 4 * SD
+  # in a subsequent step
+  group_by(subject, validity) %>%
+  mutate(lower = case_when(mean(rt) - rt_sd * sd(rt) > 
+                             min_rt ~ mean(rt) - rt_sd * sd(rt),
+                           TRUE ~ min_rt),
+         upper = mean(rt) + rt_sd * sd(rt)) %>%
+  # now, exclude RTs > 4 * SD (per participant & validity)
+  filter(rt < upper & rt > lower) %>%
+  ungroup() %>%
+  # tidy up dataframe by removing irrelevant variables for subsequent analyses
+  select(-c(response, abort, section, correct, cue_position, target_position))
+
+
+```
+
+## Missed rejections
+
+Number of trials excluded due to missed rejections.
+
+```{r missed rej, message = F, warning= F}
+
+raw %>%
+  # exclude practice trials & aborted trials, also exclude catch trials and incorrect trials
+  filter(section == 1, abort == 0, soa != 0, correct == 1) %>%
+          # join with out of bounds df
+  left_join(., outofbounds, by = c("subject", "trial")) %>%
+  # exclude subjects with too high FA rate
+  filter(!subject %in% filter(fa, exclude == 1)$subject) %>%
+  group_by(subject) %>%
+  summarise(needs_abortion = sum(needs_abortion, na.rm = T)) %>%
+  ungroup() %>%
+  summarise(min = min(needs_abortion),
+            mean = mean(needs_abortion),
+            max = max(needs_abortion),
+            sd = sd(needs_abortion)) %>%
+  knitr::kable(.) %>%
+  kable_styling(bootstrap_options = c("striped", "hover"))
+
+
+
+```
+
+
+## Exlusions due to RT boundaries
+
+Number of trials excluded due to RT boundaries.
+
+```{r excl due to rt, message = F, warning= F}
+
+
+raw %>%
+  # exclude practice trials & aborted trials
+  filter(section == 1, abort == 0) %>%
+  # exclude trials that were missed to be aborted and repeated online
+  full_join(., outofbounds) %>%
+  filter(is.na(needs_abortion)) %>%
+  # exclude subjects with too high FA rate
+  filter(!subject %in% filter(fa, exclude == 1)$subject) %>%
+  # exclude catch trials and incorrect trials
+  filter(soa != 0, correct == 1) %>%
+  # prepare lower and upper bound per subject/condition to exlude RTs > 4 * SD
+  # in a subsequent step
+  group_by(subject, validity) %>%
+  mutate(lower = case_when(mean(rt) - rt_sd * sd(rt) > 
+                             min_rt ~ mean(rt) - rt_sd * sd(rt),
+                           TRUE ~ min_rt),
+         upper = mean(rt) + rt_sd * sd(rt)) %>%
+  # now, exclude RTs > 4 * SD (per participant & validity)
+  filter(rt > upper | (rt < lower | rt < 200)) %>%
+  ungroup() %>%
+  count(subject) %>%
+  summarize(min_n = min(n),
+            mean_n = mean(n),
+            max_n = max(n),
+            sd_n = sd(n)) %>%
+  knitr::kable(.) %>%
+  kable_styling(bootstrap_options = c("striped", "hover"))
+
+
+```
+
+
+## Data loss 
+
+Percentage of data loss.
+
+```{r data loss, message = F, warning= F}
+clean %>%
+  count(subject) %>%
+  mutate(p_loss = 1-(n/600)) %>%
+  summarize(min_p_loss = min(p_loss),
+            mean_p_loss = mean(p_loss),
+            max_p_loss = max(p_loss),
+            sd_p_loss = sd(p_loss))  %>%
+  knitr::kable(.) %>%
+  kable_styling(bootstrap_options = c("striped", "hover"))
+```
+
+## Remaining trials per cell
+
+How many trials per SOA/validity combination are left after applying the above-mentioned exclusions?
+
+
+```{r tpc condition, message = F, warning= F}
+
+clean %>% 
+  group_by(subject, validity, soa) %>% 
+  summarize(n = n()) %>%
+  summarize(min = min(.data$n),
+            mean = mean(.data$n),
+            max = max(.data$n)) %>%
+  ungroup() %>%
+  summarize(min = min(.data$min),
+            mean = mean(.data$mean),
+            max = max(.data$max)) %>%
+  knitr::kable(.) %>%
+  kable_styling(bootstrap_options = c("striped", "hover")) %>% 
+  scroll_box(width = "100%", height = "90px")
+
+
+
+```
+
+
+
+
+# Z-Scaling
+
+RTs were z-scaled within subjects regardless of SOA and validity.
+
+```{r scaling, message = F, warning= F}
+
+# z-scale RTs
+clean <- clean %>%
+  group_by(subject) %>%
+  mutate(rtz = as.numeric(scale(rt))) %>%
+  select(-c(lower, upper, needs_abortion)) %>%
+  relocate(validity, .before = rt) 
+
+```
+
+# Difference Time Courses
+
+Creating difference time courses by computing the difference "invalid-valid" on the single subject level. The single subject time courses are then averaged across subjects.
+
+```{r difference time course ss, , message = F, warning= F, fig.height=unit(8, "cm")}
+
+# single subject difference time courses
+diff <- clean %>%
+  group_by(subject, validity, soa) %>%
+  summarize(rt = mean(rt),
+            rtz = mean(rtz)) %>%
+  pivot_wider(names_from = validity,
+              values_from = c("rt", "rtz")) %>%
+  rowwise() %>%
+  mutate(diff = rt_invalid - rt_valid,
+         diffz = rtz_invalid - rtz_valid) %>%
+  ungroup() %>%
+  select(-c(rt_invalid, rt_valid, rtz_invalid, rtz_valid))
+
+# grand average difference time course
+# compute grand average difference time course
+diff_agg <- diff %>%
+  group_by(soa) %>%
+  summarize(diff = mean(diffz)) 
+
+
+```
+
+
+
+# Export
+
+Exporting preprocessed datasets (raw, cleaned, single subject difference time courses, grand average difference time course)
+
+```{r export}
+if(export == TRUE){
+  save(file = paste0(repo_path, "raw.RData"), raw)
+  save(file = paste0(repo_path, "clean.RData"), clean)
+  save(file = paste0(repo_path, "diff.RData"), diff)
+  save(file = paste0(repo_path, "diff_agg.RData"), diff_agg)
+}
+
+```

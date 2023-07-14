@@ -1,0 +1,256 @@
+---
+title: "IOR Analysis"
+author: "Rene Michel"
+date: '2022-06-09'
+output: html_document
+---
+
+# Configuration
+
+### Report settings
+
+```{r report settings, message = FALSE, warning=FALSE}
+
+knitr::opts_chunk$set(echo = FALSE, 
+                      message = FALSE, 
+                      warning = FALSE, 
+                      out.width = "100%")
+
+do_save = TRUE
+
+``` 
+
+### Define paths and dependencies
+
+```{r cfg paths, message = FALSE, warning=FALSE}
+# PATHS -----------------------------------------------------------------------
+repo_path <- "insert_path_here"
+# REQUIRED PKGS ----------------------------------------------------------------
+git_pkgs <- c("remichel/rmTools@HEAD")
+cran_pkgs <- c(
+  "Rmisc", "dplyr", "tidyr", "afex", "ggplot2", "emmeans",
+  "knitr", "kableExtra", "apa"
+  )
+
+```
+
+```{r pks, message = FALSE, warning=FALSE}
+# load and install required packages
+rmTools::rm_install_packages(
+  git_pkgs = git_pkgs,
+  git_private_pkgs = NULL,
+  cran_pkgs = cran_pkgs, load_after_install = T
+)
+```
+
+
+### Define analysis parameters
+
+Set all required parameters for the subsequent analysis. 
+
+
+```{r cfg analysis, echo = T}
+# SOA selection for ANOVA (based on Posner&Cohen 1981)
+anova_soas <- c(41.7, 83.3, 208.3, 291.7, 500)
+# multiple comparison correction for post hoc tests
+mcc_method <- "bon"
+```
+
+
+# Load datasets
+
+```{r load data, message = FALSE, warning=FALSE}
+load(paste0(repo_path, "clean.Rdata"))
+load(paste0(repo_path, "diff.Rdata"))
+load(paste0(repo_path, "diff_agg.Rdata"))
+```
+
+# Descriptive Statistics (after exclusions)
+
+
+
+## RTs
+
+#### RTs by validity
+
+```{r rt descr val, message = FALSE, warning=FALSE}
+
+clean %>%
+  group_by(subject, validity) %>%
+  summarize(rt = mean(rt)) %>%
+  group_by(validity) %>%
+  summarize(mean_rt = mean(rt),
+            sd_rt = sd(rt)) %>%
+  knitr::kable(.) %>%
+  kable_styling(bootstrap_options = c("striped", "hover"))
+```
+
+
+## Grand average time course by validity
+
+Errorbars represent Cosineau-corrected SE.
+
+```{r ga tc, message = FALSE, warning=FALSE}
+
+
+# RTZ publication plot
+pdat <- clean %>%
+  summarySEwithin(data = ., 
+                  measurevar = "rtz",
+                  withinvars = c("validity", "soa"),
+                  idvar = "subject") %>%
+  
+  mutate(soa = fac2num(soa)) %>%
+  mutate(highlight_dots = case_when(soa %in% anova_soas ~ 1,
+                                    TRUE ~ 0))
+
+labels = rep('', 25)
+labels[seq(1,25,2)] = as.character(sort(unique(pdat$soa))[seq(1,25,2)])
+
+
+tc_plot <- pdat %>%
+  ggplot(aes(x = soa, y = rtz, group = validity)) +
+  geom_hline(yintercept = 0, color = "grey50", linetype = "dotted", size = 1.2)+
+  geom_line(aes(color = validity), size = 1.2, alpha = .5)+
+  geom_linerange(aes(min = rtz - se, 
+                    max = rtz + se, 
+                    color = validity), size = 1.1,
+                position=position_dodge(width=8))+
+  geom_point(aes(color = validity), size = 2.3, position=position_dodge(width=8))+
+  geom_point(data = pdat[pdat$highlight_dots == 1,], aes(fill = validity), size = 4, color = "black", shape = 21, position=position_dodge(width=8))+
+  annotate("rect", xmin = anova_soas[1] - 18, xmax = anova_soas[1] + 18, ymin = .5, ymax = 1.1,
+             alpha = 0, color= "black")+ 
+  annotate("text", x = anova_soas[1], y = 1.12, label = "*", size = 10)+ 
+  annotate("rect", xmin = anova_soas[2] - 18, xmax = anova_soas[2] + 18, ymin = .25, ymax = .6,
+             alpha = 0, color= "black")+ 
+  annotate("text", x = anova_soas[2], y = .635, label = "n.s.", size = 4, fontface = 2)+ 
+  annotate("rect", xmin = anova_soas[3] - 18, xmax = anova_soas[3] + 18, ymin = 0, ymax = .25,
+             alpha = 0, color= "black")+ 
+  annotate("text", x = anova_soas[3], y = .285, label = "n.s.", size = 4, fontface = 2)+ 
+  annotate("rect", xmin = anova_soas[4] - 18, xmax = anova_soas[4] + 18, ymin = -.35, ymax = .1,
+             alpha = 0, color= "black")+
+  annotate("text", x = anova_soas[4], y = .12, label = "*", size = 10)+ 
+  annotate("rect", xmin = anova_soas[5] - 18, xmax = anova_soas[5] + 18, ymin = -.6, ymax = .2,
+             alpha = 0, color= "black")+
+  annotate("text", x = anova_soas[5], y = .22, label = "*", size = 10)+ 
+  scale_x_continuous(expand = c(0.02, 0), breaks = sort(unique(pdat$soa)), labels = labels) +
+  scale_y_continuous(expand = c(0.05, 0)) +
+  theme_classic() +
+  theme(legend.position="bottom",
+        axis.title = element_text(face = "bold", size = 20),
+        axis.text = element_text(face = "bold", size = 12),
+        legend.title = element_blank(),
+        legend.text = element_text(face = "bold", size = 12)) +
+  labs(x = "CTOA", y = "z-standardized RT")
+
+
+tc_plot
+  
+
+if(do_save) ggsave(filename = paste0(repo_path, "tc_plot.svg"), plot = tc_plot, width = 2400, height = 1900, units = "px")
+
+if(do_save) ggsave(filename = paste0(repo_path, "tc_plot.png"), plot = tc_plot, width = 2400, height = 1900, units = "px")
+
+```
+
+## Difference (invalid - valid) grand average time course
+
+Errorbars represent Cosineau-corrected SE.
+
+```{r difference time course ga, message = FALSE, warning=FALSE}
+
+
+# RTz DIFF publication plot
+
+
+pdat <- diff %>%
+  summarySEwithin(data = ., 
+                  measurevar = "diffz",
+                  withinvars = c("soa"),
+                  idvar = "subject") %>%
+  mutate(soa = fac2num(soa))
+
+
+labels = rep('', 25)
+labels[seq(1,25,2)] = as.character(sort(unique(pdat$soa))[seq(1,25,2)])
+
+diff_plot <- pdat %>%
+  ggplot(aes(x = soa, y = diffz)) +
+  geom_hline(yintercept = 0, color = "grey50", linetype = "dotted", size = 1.2)+
+  geom_line(size = 1.2, alpha = .5)+
+  geom_linerange(aes(min = diffz - se, 
+                    max = diffz + se), size = 1.1,
+                position=position_dodge(width=8))+
+  geom_point(size = 2.3, position=position_dodge(width=8))+
+  labs(x = "CTOA", y = "z-standardized RT difference (invalid-valid)")+
+  scale_x_continuous(expand = c(0.02, 0), breaks = sort(unique(pdat$soa)), labels = labels) +
+  scale_y_continuous(expand = c(0.05, 0)) +
+  theme_classic() +
+  theme(legend.position="bottom",
+        axis.title = element_text(face = "bold", size = 20),
+        axis.text = element_text(face = "bold", size = 12),
+        legend.title = element_blank(),
+        legend.text = element_text(face = "bold", size = 12))
+
+diff_plot
+
+
+if(do_save) ggsave(filename = paste0(repo_path, "tc_diff_plot.svg"), plot = diff_plot, width = 2400, height = 1900, units = "px")
+
+
+```
+
+
+
+# ANOVA & Post-hoc t-tests
+
+
+```{r prep anova, message = FALSE, warning=FALSE}
+
+aov_data <- clean %>%
+  # subset to Posner SOAs
+  filter(soa %in% anova_soas) %>%
+  # convert relevant variables to factors
+  mutate(validity = factor(validity),
+         soa = factor(soa))
+
+```
+
+
+### Results 
+
+Perform a repeated-measures ANOVA with z-standardized RTs as dependent variables and the CTOA and validity as within-factors. 
+
+```{r anova res, message = FALSE, warning=FALSE, comment = ""}
+# compute ANOVA (allowing GG corrections)
+aov_res <- aov_data %>%
+  aov_car(rtz ~ soa + validity + Error(subject/soa*validity), data = .) 
+
+
+# plot ANOVA results
+aov_res
+```
+
+### Post Hoc Tests
+
+Within each family of tests (i.e. tests within each factor or interaction), multiple comparison correction was applied. Thus, p-values in the subsequent tables are already corrected.
+
+```{r anova post hoc tests, message = FALSE, warning=FALSE}
+
+# post hoc tests soa
+contrast(emmeans(aov_res, ~ soa),
+         interaction = c("pairwise"),
+         adj = mcc_method) %>%
+  knitr::kable(.) %>%
+  kable_styling(bootstrap_options = c("striped", "hover"))
+
+
+# post hoc tests interaction
+contrast(emmeans(aov_res, ~ validity + soa), 
+         interaction = c("pairwise", "identity"),
+         adj = mcc_method) %>%
+  knitr::kable(.) %>%
+  kable_styling(bootstrap_options = c("striped", "hover"))
+
+```
+
